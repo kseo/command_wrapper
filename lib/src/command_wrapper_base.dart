@@ -2,6 +2,7 @@
 // is governed by a BSD-style license that can be found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:which/which.dart';
@@ -15,9 +16,7 @@ class CommandResult {
   final List<String> stderr;
   final int exitCode;
 
-  CommandResult(String stdout, String stderr, this.exitCode)
-      : this.stdout = _toLines(stdout),
-        this.stderr = _toLines(stderr);
+  CommandResult(this.stdout, this.stderr, this.exitCode);
 }
 
 /// [CommandWrapper] runs the executable as a separate process and returns
@@ -44,45 +43,52 @@ class CommandWrapper {
   /// Throws a [ProcessException] if [throwsOnError] is true and exitCode is
   /// not 0.
   Future<CommandResult> run(List<String> args,
-      {bool throwOnError: true, String processWorkingDir}) async {
+      {bool throwOnError: true,
+      String processWorkingDir,
+      List<String> stdin}) async {
     final executable = await _getExecutable();
 
-    final result = await Process.run(executable, args,
+    final process = await Process.start(executable, args,
         workingDirectory: processWorkingDir, runInShell: true);
+    if (stdin != null) {
+      for (final line in stdin) {
+        process.stdin.writeln(line);
+      }
+      process.stdin.close();
+    }
+    List<String> stdout = [];
+    List<String> stderr = [];
+    process.stdout
+        .transform(UTF8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) {
+      stdout.add(line);
+    });
+    process.stderr
+        .transform(UTF8.decoder)
+        .transform(const LineSplitter())
+        .listen((line) {
+      stderr.add(line);
+    });
 
+    final exitCode = await process.exitCode;
     if (throwOnError) {
-      _throwIfProcessFailed(result, executable, args);
+      _throwIfProcessFailed(executable, exitCode, stdout, stderr, args);
     }
 
-    return new CommandResult(result.stdout, result.stderr, result.exitCode);
+    return new CommandResult(stdout, stderr, exitCode);
   }
 }
 
-/// A regular expression matching a trailing CR character.
-final _trailingCR = new RegExp(r"\r$");
-
-/// Splits [text] on its line breaks in a Windows-line-break-friendly way.
-List<String> _splitLines(String text) =>
-    text.split("\n").map((line) => line.replaceFirst(_trailingCR, "")).toList();
-
-void _throwIfProcessFailed(
-    ProcessResult pr, String process, List<String> args) {
-  assert(pr != null);
-  if (pr.exitCode != 0) {
+void _throwIfProcessFailed(String executable, int exitCode, List<String> stdout,
+    List<String> stderr, List<String> args) {
+  if (exitCode != 0) {
     var message = '''
 stdout:
-${pr.stdout}
+${stdout.join('\n')}
 stderr:
-${pr.stderr}''';
+${stderr.join('\n')}''';
 
-    throw new ProcessException(process, args, message, pr.exitCode);
+    throw new ProcessException(executable, args, message, exitCode);
   }
-}
-
-List<String> _toLines(String output) {
-  final lines = _splitLines(output);
-  if (!lines.isEmpty && lines.last == "") {
-    lines.removeLast();
-  }
-  return lines;
 }
